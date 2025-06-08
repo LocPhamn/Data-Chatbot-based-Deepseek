@@ -1,65 +1,72 @@
+import pandas as pd
 from langchain.text_splitter import RecursiveCharacterTextSplitter, CharacterTextSplitter
 from langchain_community.document_loaders import PyPDFLoader, DirectoryLoader
 from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import GPT4AllEmbeddings
 from langchain_huggingface import HuggingFaceEmbeddings
-import re
+from langchain_core.documents import Document
+from langchain_unstructured import UnstructuredLoader
+
 
 # Khai bao bien
 pdf_data_path = "data"
-vector_db_path = "vectorstores_v2/db_faiss"
+file_paths = [
+    "./data/HoaPhatDoc.pdf",
+]
 
-def preprocess_text(text):
-    # Loại bỏ header/footer phổ biến (ví dụ: tên công ty, số trang)
-    lines = text.split('\n')
-    cleaned_lines = []
-    for line in lines:
-        line = line.strip()
-        # Loại bỏ dòng trống, dòng chỉ có số (số trang), dòng rất ngắn
-        if not line or line.isdigit() or len(line) < 4:
-            continue
-        # Loại bỏ các header/footer phổ biến (tùy chỉnh theo file PDF)
-        if re.search(r'Hòa Phát|Báo cáo thường niên|Page|Trang|Công ty cổ phần', line, re.IGNORECASE):
-            continue
-        cleaned_lines.append(line)
-    # Gộp lại thành đoạn văn
-    text = ' '.join(cleaned_lines)
-    # Loại bỏ nhiều khoảng trắng liên tiếp
-    text = re.sub(r'\s+', ' ', text)
-    # Loại bỏ ký tự đặc biệt không cần thiết (tùy chỉnh thêm nếu cần)
-    text = re.sub(r'[^\x00-\x7FÀ-ỹ.,;:?!%()\\/-]', '', text)
-    return text
+vector_db_path = "directoryloader_preprocess/db_faiss"
 
 
-def create_db_from_files():
-    # Khai bao loader de quet toan bo thu muc dataa
-    loader = DirectoryLoader(pdf_data_path, glob="*.pdf", loader_cls = PyPDFLoader)
+def load_qa_csv_to_documents(csv_path):
+    """
+    Load Q&A samples from a CSV file and convert each row to a Document object.
+    """
+    df = pd.read_csv(csv_path)
+    documents = []
+
+    for _, row in df.iterrows():
+        content = f"Câu hỏi: {row['question']}\nTrả lời: {row['answer']}"
+        documents.append(Document(page_content=content))
+
+    return documents
+
+
+def create_db_from_files(qa_samples_context=None):
+    """
+    Create a FAISS vector database from PDF files and optionally add a Q&A context document.
+    """
+    loader = DirectoryLoader(pdf_data_path, glob="*.pdf", loader_cls=PyPDFLoader)
     documents = loader.load()
-    for doc in documents:
-        doc.page_content = preprocess_text(doc.page_content)
 
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=3000, chunk_overlap=300)
+    # If Q&A context is provided, add as a single document
+    if qa_samples_context:
+        qa_doc = Document(page_content=qa_samples_context, metadata={"source": "qa_samples"})
+        documents.append(qa_doc)
+
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=50)
     chunks = text_splitter.split_documents(documents)
 
-    # Embeding
+    # Embedding
     embedding_model = HuggingFaceEmbeddings(model_name="bkai-foundation-models/vietnamese-bi-encoder")
     db = FAISS.from_documents(chunks, embedding_model)
     db.save_local(vector_db_path)
     return db
 
-def print_loaded_text():
-    loader = DirectoryLoader(pdf_data_path, glob="*.pdf", loader_cls=PyPDFLoader)
-    documents = loader.load()
-    for doc in documents:
-        doc.page_content = preprocess_text(doc.page_content)
-    for i, doc in enumerate(documents):
-        print(f"--- Document {i+1} ---")
-        print(len(doc.page_content[:]))  # In 1000 ký tự đầu tiên của mỗi trang/document
-        print("\n")
+
+def add_csv_to_vectorstore(csv_path, vectorstore, embedding_model=None):
+    """
+    Add Q&A samples from a CSV file as individual documents to an existing vectorstore.
+    If embedding_model is not provided, a default one will be created.
+    """
+    if embedding_model is None:
+        embedding_model = HuggingFaceEmbeddings(model_name="bkai-foundation-models/vietnamese-bi-encoder")
+    documents = load_qa_csv_to_documents(csv_path)
+    vectorstore.add_documents(documents)
+    vectorstore.save_local(vector_db_path)
+    print(f"Đã thêm {len(documents)} Q&A mẫu vào vectorstore và lưu lại.")
 
 
-# Gọi hàm để in ra text đã load từ PDF
-# print_loaded_text()
-
-# Tạo vector DB từ file
-create_db_from_files()
+if __name__ == '__main__':
+    # Tạo vector DB từ PDF
+    db = create_db_from_files()
+    # Thêm các Q&A mẫu từ CSV vào vector DB dưới dạng nhiều documents
+    add_csv_to_vectorstore("data/hoaphatdata.csv", db)
